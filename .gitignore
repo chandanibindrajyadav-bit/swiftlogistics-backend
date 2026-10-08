@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+app.db
+*.db
+__pycache__/
+*.py[cod]
+.venv/
+venv/
