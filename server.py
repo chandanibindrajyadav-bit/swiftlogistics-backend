@@ -18,6 +18,7 @@ import jwt
 import asyncio
 import secrets
 import smtplib
+import requests
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -258,6 +259,8 @@ async def seed_demo_accounts():
 # Gmail setup
 GMAIL_USER = os.getenv('GMAIL_USER', '')
 GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD', '').replace(' ', '')
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
+SENDER_EMAIL = os.getenv('SENDER_EMAIL', '')
 
 # JWT setup
 JWT_SECRET = os.getenv('JWT_SECRET')
@@ -484,17 +487,29 @@ async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
-def send_gmail_email(to_email: str, subject: str, html_content: str):
-    """Send email using Gmail SMTP - works with ANY email address"""
+def deliver_shipment_email(to_email: str, subject: str, html_content: str):
+    """Send through Resend HTTPS when configured, with bounded Gmail SMTP fallback."""
+    if RESEND_API_KEY:
+        if not SENDER_EMAIL:
+            raise RuntimeError("SENDER_EMAIL must be configured when using Resend.")
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={"from": SENDER_EMAIL, "to": [to_email], "subject": subject, "html": html_content},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return
+
     if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        raise RuntimeError("Gmail is not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD in backend/.env.")
+        raise RuntimeError("Email is not configured. Set RESEND_API_KEY and SENDER_EMAIL, or Gmail credentials.")
 
     msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
     msg['From'] = GMAIL_USER
     msg['To'] = to_email
     msg.attach(MIMEText(html_content, 'html'))
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as server:
         server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
         server.sendmail(GMAIL_USER, to_email, msg.as_string())
 
@@ -607,10 +622,11 @@ async def send_shipment_email(request: AdminEmailRequest, current_user: dict = D
     customer_email = shipment["user_email"]
 
     try:
-        await asyncio.to_thread(send_gmail_email, customer_email, "Your Shipment Cost & OTP - SwiftLogistics", html_content)
+        await asyncio.to_thread(deliver_shipment_email, customer_email, "Your Shipment Cost & OTP - SwiftLogistics", html_content)
         return {
             "status": "success",
             "message": f"Email sent successfully to {customer_email}",
+            "customer_email": customer_email,
             "otp": otp
         }
     except Exception as e:
